@@ -30,6 +30,7 @@ class BasicBlock(nn.Module):
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
+        self.before_bn1 = norm_layer(inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
@@ -107,12 +108,12 @@ class BasicBlock(nn.Module):
 
     def _case4_f(self, x):
         identity = x
-        out = self.relu(x)
-        out = self.bn1(out)
+        out = self.before_bn1(x)
+        out = self.relu(out)
         out = self.conv1(out)
 
-        out = self.relu2(out)
         out = self.bn2(out)
+        out = self.relu2(out)
         out = self.conv2(out)
 
         if self.downsample is not None:

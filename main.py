@@ -17,7 +17,7 @@ parser.add_argument('--start_epoch', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--batch_size', '--batch-size', default=128, type=int,
                     help='mini-batch size (default: 100)')
-parser.add_argument('--lr', '--learning-rate', default=1e-2, type=float,
+parser.add_argument('--lr', '--learning-rate', default=1e-1, type=float,
                     help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
 parser.add_argument('--nesterov', default=True, type=bool, help='nesterov momentum')
@@ -42,7 +42,7 @@ torch.cuda.set_device(args.gpu)
 
 print()
 print(args)
-logger = SummaryWriter(log_dir=args.log_name)
+logger = SummaryWriter(log_dir='./runs/'+args.log_name)
 
 
 def build_dataset(dataset):
@@ -132,7 +132,7 @@ def train(model, train_loader, optimizer, epoch):
 
 
 def adjust_learning_rate(optimizer, epochs):
-    lr = args.lr * ((10 ** int(epochs >= args.warmup)) * (0.1 ** int(epochs >= 80)) * (0.1 ** int(epochs >= 120)))
+    lr = args.lr * ((0.1 ** int(epochs >= 40)) * (0.1 ** int(epochs >= 80)) * (0.1 ** int(epochs >= 120)))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -156,8 +156,8 @@ if __name__ == "__main__":
 
         if best_acc < test_acc:
             best_acc = test_acc
-            torch.save(model.state_dict(), args.log_name + "/best.pth")
+            torch.save(model.state_dict(), './runs/'+ args.log_name + "/best.pth")
     # 保存模型
-    torch.save(model.state_dict(), args.log_name + "/last.pth")
+    torch.save(model.state_dict(), './runs/' + args.log_name + "/last.pth")
     print("Best Acc: {:.4f}%".format(best_acc))
     logger.add_text("Best Acc", str(best_acc), global_step=0)

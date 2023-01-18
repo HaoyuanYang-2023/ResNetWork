@@ -133,8 +133,6 @@ class BasicBlock(nn.Module):
             out = self._case3_f(x)
         if self.case == 4:
             out = self._case4_f(x)
-        else:
-            raise ValueError("case in not valid, should be onr of {0,1,2,3,4}")
         return out
 
 

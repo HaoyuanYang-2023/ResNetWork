@@ -141,12 +141,13 @@ class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None,case=0):
+                 base_width=64, dilation=1, norm_layer=None, case=0):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 16.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.before_bn = norm_layer(inplanes)
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = norm_layer(width)
         self.conv2 = conv3x3(width, width, stride, groups, dilation)
@@ -223,6 +224,50 @@ class Bottleneck(nn.Module):
 
         return out
 
+    def _case3_f(self, x):
+        identity = x
+
+        out = self.relu(x)
+        out = self.conv1(out)
+        out = self.bn1(out)
+
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out = self.relu(out)
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out = out + identity
+
+        return out
+
+    def _case4_f(self, x):
+        identity = x
+
+        out = self.before_bn(x)
+        out = self.relu(out)
+        out = self.conv1(out)
+
+        out = self.bn2(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+
+        out = self.bn3(out)
+        out = self.relu(out)
+        out = self.conv3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out = out + identity
+
+        return out
+
     def forward(self, x):
         if self.case == 0:
             out = self._case0_f(x)
@@ -230,7 +275,64 @@ class Bottleneck(nn.Module):
             out = self._case1_f(x)
         if self.case == 2:
             out = self._case2_f(x)
+        if self.case == 3:
+            out = self._case3_f(x)
+        if self.case == 4:
+            out = self._case4_f(x)
         return out
+
+
+class SkipLayer(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None, case=0):
+        super(SkipLayer, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
+        self.before_bn1 = norm_layer(inplanes)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+        self.case = case
+        if case not in {0, 4}:
+            raise ValueError('Case only support {0,4}')
+
+    def _case_0(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+        return out
+
+    def _case_4(self, x):
+        identity = x
+        out = self.before_bn1(x)
+        out = self.relu(out)
+        out = self.conv1(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+
+        return out
+
+    def forward(self, x):
+        if self.case == 0:
+            return self._case_0(x)
+        if self.case == 4:
+            return self._case_4(x)
 
 
 class ResNet(nn.Module):
@@ -264,12 +366,13 @@ class ResNet(nn.Module):
         # (32,32,16)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
         self.layer1 = self._make_layer(block, 16, layers[0], case=case)
-        self.layer2 = self._make_layer(block, 32, layers[1], stride=2, dilate=replace_stride_with_dilation[0],
+        self.layer2 = self._make_layer(block, 64, layers[1], stride=2, dilate=replace_stride_with_dilation[0],
                                        case=case)
-        self.layer3 = self._make_layer(block, 64, layers[2], stride=2, dilate=replace_stride_with_dilation[1],
+        self.layer3 = self._make_layer(block, 128, layers[2], stride=2, dilate=replace_stride_with_dilation[1],
                                        case=case)
+        self.bn = norm_layer(128 * block.expansion)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(64 * block.expansion, num_classes)
+        self.fc = nn.Linear(128 * block.expansion, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -315,9 +418,9 @@ class ResNet(nn.Module):
     def _forward_impl(self, x):
         # See note [TorchScript super()]
         x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        # x = self.bn1(x)
+        # x = self.relu(x)
+        # x = self.maxpool(x)
         # print(x.shape)
         x = self.layer1(x)
         # print("Layer1:", x.shape)
@@ -326,8 +429,12 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         # print("Layer3:", x.shape)
         # x = self.layer4(x)
-
+        x = self.bn(x)
+        x = self.relu(x)
+        # avgpool: x (bs, c, h, w) -> (bs, c, 1, 1)
         x = self.avgpool(x)
+        # x.size(0) = batch size
+        # x (bs, c)
         x = x.view(x.size(0), -1)
         # print("FC:", x.shape)
         x = self.fc(x)
@@ -371,5 +478,9 @@ def resnet110(case, **kwargs):
     return ResNet(BasicBlock, [18, 18, 18], case=case, **kwargs)
 
 
+def resnet110_1layer(case, **kwargs):
+    return ResNet(SkipLayer, [36, 36, 36], case=case, **kwargs)
+
+
 def resnet164(case, **kwargs):
-    return ResNet(Bottleneck, [27, 27, 27], case=case, **kwargs)
+    return ResNet(Bottleneck, [18, 18, 18], case=case, **kwargs)

@@ -1,12 +1,13 @@
 import torch
 import argparse
+import json
 
 from torchvision.datasets import cifar
 from torchvision import transforms
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
-from resnet_2 import resnet110
+from resnet_2 import resnet110, resnet164, resnet110_1layer
 
 parser = argparse.ArgumentParser(description='PyTorch ResNet Training')
 parser.add_argument('--dataset', default='cifar10', type=str,
@@ -25,14 +26,28 @@ parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     help='weight decay (default: 5e-4)')
 parser.add_argument('--prefetch', type=int, default=0, help='Pre-fetching threads.')
 parser.add_argument('--log_name', type=str, default='./log/default', help='log name')
-parser.add_argument('--warmup', type=int, default=10)
-parser.add_argument('--gpu', type=int, default=0)
+parser.add_argument('--warmup',
+                    action='store_true',
+                    help='enables warm up')
+parser.add_argument('--gpu',
+                    type=int,
+                    default=0)
+parser.add_argument('--step1',
+                    type=int,
+                    default=80)
+parser.add_argument('--step2',
+                    type=int,
+                    default=140)
+parser.add_argument('--model', type=str, default="resnet110", choices=["resnet110", "resnet164", "resnet110-1skip"])
 parser.add_argument('--case', type=int, default=0, help="Network case\n"
                                                         "0: original\n"
                                                         "1: BN after addition\n"
                                                         "2: ReLU before addition\n"
                                                         "3: ReLU-only pre-activation\n"
                                                         "4: full pre-activation")
+parser.add_argument('--resume',
+                    action='store_true',
+                    help='resume train process')
 parser.set_defaults(augment=True)
 
 args = parser.parse_args()
@@ -42,7 +57,9 @@ torch.cuda.set_device(args.gpu)
 
 print()
 print(args)
-logger = SummaryWriter(log_dir='./runs/'+args.log_name)
+logger = SummaryWriter(log_dir='./runs/' + args.log_name)
+with open('./runs/' + args.log_name + '/params.json', mode="w") as f:
+    json.dump(args.__dict__, f, indent=4)
 
 
 def build_dataset(dataset):
@@ -69,13 +86,20 @@ def build_dataset(dataset):
         val_data = cifar.CIFAR10('./CIFAR10', train=False, transform=val_transform, download=True)
         val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size, shuffle=False,
                                                  num_workers=args.prefetch)
+    if dataset == "cifar100":
+        train_data = cifar.CIFAR100('./CIFAR100', train=True, transform=train_transform, download=True)
+        train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                                                   num_workers=args.prefetch, pin_memory=True)
+        val_data = cifar.CIFAR100('./CIFAR100', train=False, transform=val_transform, download=True)
+        val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size, shuffle=False,
+                                                 num_workers=args.prefetch)
     return train_loader, val_loader
 
 
 def accuracy(output, target):
     """Computes the precision@k for the specified values of k"""
     batch_size = target.size(0)
-
+    #  k, dim=None, largest=True, sorted=True
     _, pred = output.topk(1, 1, True, True)
     pred = pred.t()
     correct = pred.eq(target.view(1, -1).expand_as(pred))
@@ -132,20 +156,48 @@ def train(model, train_loader, optimizer, epoch):
 
 
 def adjust_learning_rate(optimizer, epochs):
-    lr = args.lr * ((0.1 ** int(epochs >= 40)) * (0.1 ** int(epochs >= 80)) * (0.1 ** int(epochs >= 120)))
+    if args.warmup:
+        lr = args.lr * ((10 ** int(epochs >= 10)) * (0.1 ** int(epochs >= args.step1)) * (0.1 ** int(epochs >= args.step2)))
+    else:
+        lr = args.lr * ((0.1 ** int(epochs >= args.step1)) * (0.1 ** int(epochs >= args.step2)))
+        # lr = args.lr * ((0.1 ** int(epochs >= 140)) * (0.1 ** int(epochs >= 180)))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
 
 train_loader, val_loader = build_dataset(args.dataset)
-model = resnet110(args.case).to(device)
+if args.model == "resnet110":
+    model = resnet110(args.case).to(device)
+elif args.model == "resnet164":
+    model = resnet164(args.case).to(device)
+elif args.model == "resnet110-1skip":
+    model = resnet110_1layer(args.case).to(device)
+else:
+    raise ValueError("Invalid model name, expected in [resnet110, resnet164, resnet-1skip], got " + args.model)
+
+if args.dataset == "cifar100":
+    in_channel = model.fc.in_features
+    model.fc = torch.nn.Linear(in_channel, 100).to(device)
 # print(model)
+if args.warmup:
+    args.lr = args.lr * 0.1
+
 optimizer_model = torch.optim.SGD(model.parameters(), args.lr,
                                   momentum=args.momentum, weight_decay=args.weight_decay)
 
 if __name__ == "__main__":
     best_acc = 0
-    for epoch in range(args.start_epoch, args.epochs):
+    start_epoch = args.start_epoch
+
+    if args.resume:
+        checkpoint = torch.load('./runs/' + args.log_name + "/checkpoints.pth")
+        assert ValueError("No checkpoint found!")
+        model.load_state_dict(checkpoint['model'])
+        optimizer_model.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch']
+        best_acc = checkpoint['best_acc']
+
+    for epoch in range(start_epoch, args.epochs):
         adjust_learning_rate(optimizer_model, epoch)
         train_acc, train_loss = train(model, train_loader, optimizer_model, epoch)
         logger.add_scalar("Loss/Train", train_loss, global_step=epoch)
@@ -156,7 +208,15 @@ if __name__ == "__main__":
 
         if best_acc < test_acc:
             best_acc = test_acc
-            torch.save(model.state_dict(), './runs/'+ args.log_name + "/best.pth")
+            torch.save(model.state_dict(), './runs/' + args.log_name + "/best.pth")
+
+        # 保存参数
+        state = {'model': model.state_dict(),
+                 'optimizer': optimizer_model.state_dict(),
+                 'epoch': epoch + 1,
+                 'best_acc': best_acc}
+        torch.save(state, './runs/' + args.log_name + "/checkpoints.pth")
+
     # 保存模型
     torch.save(model.state_dict(), './runs/' + args.log_name + "/last.pth")
     print("Best Acc: {:.4f}%".format(best_acc))
